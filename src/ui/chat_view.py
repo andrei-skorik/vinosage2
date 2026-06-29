@@ -127,10 +127,75 @@ def _format_tool_result(tool_name: str, result: Any, locale: str) -> str:
     return str(result)
 
 
+def _recommended_wines_for_feedback(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Wines worth collecting 👍/👎 on — only pair_with_food / recommend_for_me
+    results (SPEC §4.2): those are the tools that actually recommended
+    specific wines, unlike filter_wines/compare_wines/wine_stats."""
+    wines: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for tc in tool_calls:
+        result = tc.get("result")
+        if not isinstance(result, dict):
+            continue
+        if tc.get("tool_name") == "pair_with_food":
+            items = result.get("pairings") or []
+        elif tc.get("tool_name") == "recommend_for_me":
+            items = result.get("recommendations") or []
+        else:
+            continue
+        for w in items:
+            wid = w.get("wine_id")
+            if wid and wid not in seen_ids:
+                seen_ids.add(wid)
+                wines.append(w)
+    return wines
+
+
+def render_feedback_buttons(tool_calls: list[dict[str, Any]], query_id: str | None, locale: str) -> None:
+    """👍/👎 under each recommended wine (US-005). A failed write is silent —
+    only a successful one gets a st.toast; never an st.error (SPEC §5.4)."""
+    if not query_id:
+        return
+    wines = _recommended_wines_for_feedback(tool_calls)
+    if not wines:
+        return
+
+    from src.logging_db import log_feedback
+    from src.preferences import fold_feedback
+
+    session_id = st.session_state.get("session_id", "")
+    auth = st.session_state.get("auth")
+    user_id = auth.get("user_id") if auth else None
+
+    def _rate(wine: dict[str, Any], rating: str) -> None:
+        ok = log_feedback(
+            session_id=session_id,
+            query_id=query_id,
+            wine_id=wine.get("wine_id"),
+            wine_title=wine.get("title"),
+            rating=rating,
+            user_id=user_id,
+        )
+        if ok:
+            if user_id:
+                fold_feedback(user_id, wine, rating)
+            st.toast(t("feedback_saved", locale))
+
+    for w in wines:
+        wine_id = w.get("wine_id")
+        col_label, col_up, col_down = st.columns([6, 1, 1])
+        col_label.caption(w.get("title", ""))
+        if col_up.button("👍", key=f"fb_up_{query_id}_{wine_id}", help=t("feedback_up", locale)):
+            _rate(w, "up")
+        if col_down.button("👎", key=f"fb_down_{query_id}_{wine_id}", help=t("feedback_down", locale)):
+            _rate(w, "down")
+
+
 def render_assistant_extras(
     sources: list[Any],
     tool_calls: list[dict[str, Any]],
     locale: str,
+    query_id: str | None = None,
 ) -> None:
     if sources:
         label = t("sources_label", locale, count=len(sources))
@@ -156,6 +221,8 @@ def render_assistant_extras(
                     st.markdown(f"🔧 **{name}** → {summary}")
                 else:
                     st.code(f"🔧 {name}", language=None)
+
+    render_feedback_buttons(tool_calls, query_id, locale)
 
 
 def _serialize_sources(sources: list[Any]) -> list[dict[str, Any]]:
@@ -223,4 +290,5 @@ def render_chat_history(
                     msg.get("sources", []),
                     msg.get("tool_calls", []),
                     locale,
+                    query_id=msg.get("query_id"),
                 )

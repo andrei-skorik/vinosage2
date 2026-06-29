@@ -46,7 +46,7 @@ EMPTY_PROFILE: dict[str, Any] = {
     "notes": None,
 }
 
-_NOTES_MAX_LEN = 1000
+_NOTES_MAX_LEN = 4000  # matches logging_db's final_answer truncation convention
 
 
 def _authed_client(access_token: str, refresh_token: str):
@@ -96,6 +96,75 @@ def delete_preferences(user_id: str) -> bool:
     except Exception as exc:
         log.warning("delete_preferences failed: %s", exc)
         return False
+
+
+def fold_feedback(user_id: str, wine: dict[str, Any], rating: str) -> None:
+    """Fold a single 👍/👎 into the profile (SPEC §5.4).
+
+    👍 → add the wine's type/grape/style to the matching preferred_* arrays.
+    👎 → add the wine's grape/style (not type) to disliked_*, but ONLY if it
+    isn't already in the matching preferred_* array — an explicit positive
+    preference always wins over a single thumbs-down.
+
+    This is conditioning, not model training — a best-effort, idempotent
+    nudge, not RLHF. Reads/writes via the service-role client: this is an
+    internal mutation triggered by the user's own feedback click (not a
+    "show me my data" read), so it doesn't need get_preferences()'s
+    authed-client/RLS path. Failure is logged, never raised — the caller
+    (a Streamlit button click) must never see an exception.
+    """
+    try:
+        resp = get_service_db().table("user_preferences").select("*").eq("user_id", user_id).limit(1).execute()
+        profile = resp.data[0] if resp.data else dict(EMPTY_PROFILE)
+    except Exception as exc:
+        log.warning("fold_feedback read failed: %s", exc)
+        return
+
+    preferred_types = set(profile.get("preferred_types") or [])
+    preferred_grapes = set(profile.get("preferred_grapes") or [])
+    preferred_styles = set(profile.get("preferred_styles") or [])
+    disliked_types = set(profile.get("disliked_types") or [])
+    disliked_grapes = set(profile.get("disliked_grapes") or [])
+    disliked_styles = set(profile.get("disliked_styles") or [])
+
+    wine_type, wine_grape, wine_style = wine.get("type"), wine.get("grape"), wine.get("style")
+    changed = False
+
+    if rating == "up":
+        for value, bucket in (
+            (wine_type, preferred_types), (wine_grape, preferred_grapes), (wine_style, preferred_styles),
+        ):
+            if value and value not in bucket:
+                bucket.add(value)
+                changed = True
+    elif rating == "down":
+        for value, dislike_bucket, preferred_bucket in (
+            (wine_grape, disliked_grapes, preferred_grapes),
+            (wine_style, disliked_styles, preferred_styles),
+        ):
+            if value and value not in preferred_bucket and value not in dislike_bucket:
+                dislike_bucket.add(value)
+                changed = True
+
+    if not changed:
+        return
+
+    upsert_preferences(
+        user_id,
+        expertise_level=profile.get("expertise_level", "beginner"),
+        preferred_types=sorted(preferred_types),
+        preferred_grapes=sorted(preferred_grapes),
+        preferred_countries=profile.get("preferred_countries") or [],
+        preferred_regions=profile.get("preferred_regions") or [],
+        preferred_styles=sorted(preferred_styles),
+        preferred_characteristics=profile.get("preferred_characteristics") or [],
+        disliked_types=sorted(disliked_types),
+        disliked_grapes=sorted(disliked_grapes),
+        disliked_styles=sorted(disliked_styles),
+        min_price_eur_cents=profile.get("min_price_eur_cents"),
+        max_price_eur_cents=profile.get("max_price_eur_cents"),
+        notes=profile.get("notes"),
+    )
 
 
 # ── Explicit, confident-only signal extraction (SPEC §5.3 Write) ─────────────

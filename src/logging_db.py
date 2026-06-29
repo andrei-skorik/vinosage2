@@ -104,6 +104,50 @@ def log_security_event(
         log.warning("log_security_event failed: %s", exc)
 
 
+def log_feedback(
+    *,
+    session_id: str,
+    query_id: str,
+    wine_id: str | None,
+    wine_title: str | None,
+    rating: str,
+    user_id: str | None = None,
+    reason: str | None = None,
+) -> bool:
+    """Upsert into recommendation_feedback.
+
+    Logged-in users: upsert on the (user_id, query_id, wine_id) unique
+    constraint — re-tapping 👍/👎 changes the existing row's rating instead
+    of duplicating it (sql/08_feedback.sql). Anonymous users (user_id=None)
+    always insert — Postgres treats NULL != NULL, so the unique constraint
+    never applies to them anyway, and there's no per-user profile to fold
+    the rating into regardless.
+
+    Returns False (never raises) on failure so the caller stays silent —
+    SPEC §5.4: a feedback write failure must not surface an error to the user.
+    """
+    row = {
+        "session_id": session_id,
+        "user_id":    user_id,
+        "query_id":   query_id,
+        "wine_id":    wine_id,
+        "wine_title": wine_title,
+        "rating":     rating,
+        "reason":     reason,
+    }
+    try:
+        if user_id:
+            _db().table("recommendation_feedback").upsert(
+                row, on_conflict="user_id,query_id,wine_id"
+            ).execute()
+        else:
+            _db().table("recommendation_feedback").insert(row).execute()
+        return True
+    except Exception as exc:
+        log.warning("log_feedback failed: %s", exc)
+        return False
+
+
 def log_token_usage(
     *,
     query_id: str,

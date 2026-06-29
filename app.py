@@ -331,10 +331,45 @@ def main() -> None:
                 if result.status != "ok":
                     st.error(t("error_generic", locale))
 
-                st.markdown(result.answer)
-                render_assistant_extras(result.retrieved_wines, result.tool_calls, locale)
+                # ── Update session metrics ────────────────────────────────────
+                cost_micros = _compute_cost_micros(
+                    result.model_used, result.input_tokens, result.output_tokens
+                )
+                st.session_state.session_tokens_in  += result.input_tokens
+                st.session_state.session_tokens_out += result.output_tokens
+                st.session_state.session_cost_micros += cost_micros
+                st.session_state.last_latency_ms = result.latency_ms
 
-            # Persist assistant turn
+                # ── DB logging (computed before rendering so feedback buttons
+                # below have a real query_id to attach recommendation_feedback
+                # rows to) ─────────────────────────────────────────────────────
+                retrieved_ids = [str(w.wine_id) for w in result.retrieved_wines if hasattr(w, "wine_id")]
+                db_status = result.status if result.status in ("ok", "error") else "ok"
+                query_id = log_query(
+                    session_id=session_id,
+                    user_id=user_id,
+                    user_query=prompt,
+                    locale=locale,
+                    model=result.model_used,
+                    final_answer=result.answer,
+                    latency_ms=result.latency_ms,
+                    status=db_status,
+                    error_code=result.error_code,
+                    retrieved_ids=retrieved_ids,
+                )
+                log_tool_calls(query_id, result.tool_calls)
+                log_token_usage(
+                    query_id=query_id,
+                    input_tokens=result.input_tokens,
+                    output_tokens=result.output_tokens,
+                    cost_eur_micros=cost_micros,
+                )
+
+                st.markdown(result.answer)
+                render_assistant_extras(result.retrieved_wines, result.tool_calls, locale, query_id=query_id)
+
+            # Persist assistant turn (query_id lets historical re-renders show
+            # feedback buttons too — see render_chat_history).
             st.session_state.messages.append({
                 "role": "assistant",
                 "content": result.answer,
@@ -342,39 +377,8 @@ def main() -> None:
                 "tool_calls": result.tool_calls,
                 "filter_used": result.filter_used,
                 "user_query": prompt,
+                "query_id": query_id,
             })
-
-            # ── Update session metrics ────────────────────────────────────────
-            cost_micros = _compute_cost_micros(
-                result.model_used, result.input_tokens, result.output_tokens
-            )
-            st.session_state.session_tokens_in  += result.input_tokens
-            st.session_state.session_tokens_out += result.output_tokens
-            st.session_state.session_cost_micros += cost_micros
-            st.session_state.last_latency_ms = result.latency_ms
-
-            # ── DB logging ────────────────────────────────────────────────────
-            retrieved_ids = [str(w.wine_id) for w in result.retrieved_wines if hasattr(w, "wine_id")]
-            db_status = result.status if result.status in ("ok", "error") else "ok"
-            query_id = log_query(
-                session_id=session_id,
-                user_id=(_current_user() or {}).get("user_id"),
-                user_query=prompt,
-                locale=locale,
-                model=result.model_used,
-                final_answer=result.answer,
-                latency_ms=result.latency_ms,
-                status=db_status,
-                error_code=result.error_code,
-                retrieved_ids=retrieved_ids,
-            )
-            log_tool_calls(query_id, result.tool_calls)
-            log_token_usage(
-                query_id=query_id,
-                input_tokens=result.input_tokens,
-                output_tokens=result.output_tokens,
-                cost_eur_micros=cost_micros,
-            )
 
             # Rerun so the sidebar re-renders with updated metrics.
             # Flag triggers auto-scroll in the next render after the rerun.
