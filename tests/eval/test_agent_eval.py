@@ -194,3 +194,114 @@ def test_edge_stats_filtered_empty(agent):
     r = agent("How many Orange wines do you have from the moon?")
     assert r.status == "ok"
     assert r.answer
+
+
+# ── Step 8: Ragas evaluation + zero-hallucination assert ───────────────────────
+#
+# Small (8-example) dataset covering the v2.0 turn types: pairing, educational
+# (US-001), personalised recommendation (US-003), budget, and a no-match dish
+# (must come back "no_match", never an invented pairing). Faithfulness and
+# context_precision need an LLM-as-judge — they run through our own
+# get_llm() (OpenRouter), wrapped for ragas, so no second provider/key is
+# required beyond what the rest of the suite already needs.
+
+_EVAL_DATASET = [
+    {"query": "What wine goes with dark chocolate cake?", "kind": "pairing"},
+    {"query": "What wine pairs well with grilled salmon?", "kind": "pairing"},
+    {"query": "What is Nebbiolo?", "kind": "educational"},
+    {"query": "Explain what makes a wine 'full-bodied'.", "kind": "educational"},
+    {"query": "Recommend something for me tonight.", "kind": "personalised"},
+    {"query": "I want 3 bottles for a total of 30 euros.", "kind": "budget"},
+    {"query": "What wine goes with durian fruit ice cream?", "kind": "no_match_dish"},
+    # Deliberately zero words from pair_with_food._FOOD_NOUNS — "unicorn
+    # steak" was tried first and rejected: "steak" IS a whitelisted noun, so
+    # the tool correctly matched real steak pairings (not a no-match case at
+    # all). This one has no recognised food noun anywhere in the phrase.
+    {"query": "What wine pairs with a purple unicorn dust dessert?", "kind": "no_match_dish"},
+]
+
+
+def _catalog_wine_ids() -> set[str]:
+    from src.catalog import get_active_wines_df
+    df = get_active_wines_df()
+    return set(df["wine_id"].astype(str).tolist())
+
+
+def test_pair_with_food_results_are_all_catalog_wines(agent):
+    """Custom assert (no ragas needed): every wine pair_with_food returns,
+    across the whole dataset, must exist in the live catalog — zero
+    hallucinated pairings (the sacred anti-hallucination guarantee, exercised
+    end-to-end through the real graph + real LLM, not just the tool unit)."""
+    catalog_ids = _catalog_wine_ids()
+    checked_any = False
+
+    for example in _EVAL_DATASET:
+        if example["kind"] not in ("pairing", "no_match_dish"):
+            continue
+        r = agent(example["query"])
+        assert r.status == "ok"
+        for tc in r.tool_calls:
+            if tc["tool_name"] != "pair_with_food":
+                continue
+            result = tc.get("result") or {}
+            pairings = result.get("pairings") or []
+            checked_any = True
+            for p in pairings:
+                assert str(p["wine_id"]) in catalog_ids, (
+                    f"Hallucinated wine_id {p['wine_id']!r} for query {example['query']!r}"
+                )
+            if example["kind"] == "no_match_dish":
+                assert result.get("result") == "no_match" or not pairings
+
+    assert checked_any, "No pair_with_food calls were observed — dataset or routing changed"
+
+
+def test_ragas_faithfulness_and_context_precision():
+    """Faithfulness (answer grounded in retrieved/tool context) and
+    context_precision (retrieved context is relevant) over the dataset's
+    RAG-bearing turns. Skips cleanly if ragas isn't installed — on Windows
+    without the MS C++ Build Tools, ragas' scikit-network dependency fails
+    to build a wheel; install on Linux/CI or with build tools present to run
+    this for real."""
+    ragas = pytest.importorskip("ragas")
+    pytest.importorskip("ragas.metrics")
+
+    from ragas import EvaluationDataset, SingleTurnSample, evaluate
+    from ragas.llms import LangchainLLMWrapper
+    from ragas.metrics import ContextPrecision, Faithfulness
+
+    from src.agent import run_agent
+    from src.llm import get_llm
+    from src.rag import retrieve
+
+    judge_llm = LangchainLLMWrapper(get_llm(temperature=0.0))
+
+    samples = []
+    for example in _EVAL_DATASET:
+        if example["kind"] in ("no_match_dish",):
+            continue  # nothing to ground a "no match" answer against
+        rag_result = retrieve(example["query"])
+        contexts = [
+            (w.payload.get("description") or "")[:500]
+            for w in rag_result.wines
+            if w.payload.get("description")
+        ] or [""]
+        r = run_agent(example["query"], precomputed_rag=rag_result.wines, precomputed_filter=rag_result.filter_used)
+        assert r.status == "ok"
+        samples.append(SingleTurnSample(
+            user_input=example["query"],
+            response=r.answer,
+            retrieved_contexts=contexts,
+        ))
+
+    dataset = EvaluationDataset(samples=samples)
+    result = evaluate(dataset, metrics=[Faithfulness(llm=judge_llm), ContextPrecision(llm=judge_llm)])
+    df = result.to_pandas()
+
+    mean_faithfulness = df["faithfulness"].mean()
+    assert mean_faithfulness >= 0.85, f"Mean faithfulness {mean_faithfulness:.2f} below 0.85 threshold"
+    # context_precision is reported, not threshold-gated — it needs a
+    # ground-truth reference per sample to be meaningful, which this
+    # lightweight 8-example dataset doesn't carry yet.
+    print(f"\nRagas results — faithfulness: {mean_faithfulness:.3f}, "
+          f"context_precision: {df['context_precision'].mean():.3f}")

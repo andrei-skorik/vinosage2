@@ -159,6 +159,8 @@ pytest -m integration
 pytest -m "integration or not integration"
 ```
 
+Full eval suite (Ragas): `pip install -r requirements-eval.txt` (Linux/CI only; requires build tools on Windows).
+
 Unit tests cover all 5 tools + RAG components + i18n — 69 tests, ~5 s.
 Integration eval tests (US-001..011 + 8 edge cases) are excluded by default.
 

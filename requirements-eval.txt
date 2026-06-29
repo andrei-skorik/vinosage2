@@ -1,0 +1,15 @@
+# VinoSage — eval-only dependencies (Ragas faithfulness/context_precision).
+#
+# NOT part of the main app or its default test run — only
+# tests/eval/test_agent_eval.py::test_ragas_faithfulness_and_context_precision
+# needs this, and that test is pytest.importorskip-guarded so the rest of the
+# suite (and the app itself) runs fine without it.
+#
+# Windows constraint: ragas depends transitively on scikit-network, which
+# ships no Windows wheel and must build a C extension from source. That build
+# requires the Microsoft C++ Build Tools (https://visualstudio.microsoft.com/
+# visual-cpp-build-tools/) — without them, `pip install -r requirements-eval.txt`
+# fails on Windows with "Microsoft Visual C++ 14.0 or greater is required."
+# Install on Linux/CI (prebuilt wheels available there) or add the build
+# tools locally before installing on Windows.
+ragas
