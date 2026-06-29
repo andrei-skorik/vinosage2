@@ -75,6 +75,35 @@ def log_tool_calls(query_id: str, tool_calls: list[dict[str, Any]]) -> None:
         log.warning("log_tool_calls failed: %s", exc)
 
 
+def log_security_event(
+    *,
+    session_id: str,
+    user_query: str,
+    event_type: str,
+    severity: str,
+    action_taken: str,
+    user_id: str | None = None,
+    locale: str | None = None,
+    matched_rule: str | None = None,
+    model: str | None = None,
+) -> None:
+    """Insert into security_events. Never visible to users — service-role only."""
+    try:
+        _db().table("security_events").insert({
+            "session_id":   session_id,
+            "user_id":      user_id,
+            "locale":       locale,
+            "event_type":   event_type,
+            "severity":     severity,
+            "user_query":   user_query[:2000],
+            "matched_rule": matched_rule,
+            "action_taken": action_taken,
+            "model":        model,
+        }).execute()
+    except Exception as exc:
+        log.warning("log_security_event failed: %s", exc)
+
+
 def log_token_usage(
     *,
     query_id: str,

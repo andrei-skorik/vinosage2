@@ -112,6 +112,15 @@ def _format_tool_result(tool_name: str, result: Any, locale: str) -> str:
             metric = result.get("metric", "")
             value = result.get("value", result.get("value_eur", result.get("value_abv")))
             return t("tool_stats_result", locale, metric=metric, value=value)
+
+        if tool_name == "explain_wine_concept":
+            concept = result.get("concept", "")
+            return t("tool_explain_result", locale, concept=concept)
+
+        if tool_name == "recommend_for_me":
+            recs = result.get("recommendations", [])
+            titles = ", ".join(r["title"] for r in recs)
+            return t("tool_recommend_result", locale, count=result.get("count", len(recs)), titles=titles)
     except Exception:
         return str(result)
 

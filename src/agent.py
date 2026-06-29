@@ -13,27 +13,27 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from langchain.agents import create_agent
-from langchain_core.messages import AIMessage, ToolMessage
-
 from src.config import (
     CHAT_MODELS,
     DEFAULT_LOCALE,
     DEFAULT_MODEL,
-    FALLBACK_MODEL,
     SUPPORTED_LOCALES,
 )
-from src.llm import get_llm
-from src.rag import RetrievedWine, retrieve
+from src.rag import RetrievedWine
 from src.tools.calculate_budget import calculate_budget
 from src.tools.compare_wines import compare_wines
+from src.tools.explain_wine_concept import explain_wine_concept
 from src.tools.filter_wines import filter_wines
 from src.tools.pair_with_food import pair_with_food
 from src.tools.wine_stats import wine_stats
 
 log = logging.getLogger(__name__)
 
-TOOLS = [filter_wines, pair_with_food, calculate_budget, compare_wines, wine_stats]
+# recommend_for_me is intentionally absent here — SPEC §3.3 requires it be
+# built per-request via build_recommend_for_me_tool(profile) once the graph
+# (Step 3) resolves the caller's taste profile, so the LLM never passes
+# identity as a tool argument.
+TOOLS = [filter_wines, pair_with_food, calculate_budget, compare_wines, wine_stats, explain_wine_concept]
 
 _LOCALE_NAMES = {
     "en": "English",
@@ -273,8 +273,18 @@ def run_agent(
     history: list[dict[str, Any]] | None = None,
     precomputed_rag: list[RetrievedWine] | None = None,
     precomputed_filter: dict[str, Any] | None = None,
+    user_id: str | None = None,
+    profile: dict[str, Any] | None = None,
+    session_id: str | None = None,
 ) -> AgentResult:
-    """Run the tool-calling agent and return a structured result."""
+    """Run the LangGraph turn pipeline and return a structured result.
+
+    Thin wrapper around the compiled graph (src/graph.py): builds the initial
+    state, invokes guard -> load_preferences -> router -> retrieve -> agent
+    (<->tools, with the retry->fallback loop) -> extract_preferences, and maps
+    the final state back into AgentResult. Imported lazily to avoid a circular
+    import (src.graph imports TOOLS/_build_messages/etc. from this module).
+    """
     if locale not in SUPPORTED_LOCALES:
         locale = DEFAULT_LOCALE
     if model not in CHAT_MODELS:
@@ -282,101 +292,30 @@ def run_agent(
 
     t0 = time.monotonic()
 
-    # 1. RAG retrieval for context (skip if caller already retrieved)
-    if precomputed_rag is not None:
-        rag_results = precomputed_rag
-        filter_used = precomputed_filter or {}
-    else:
-        try:
-            rag_result = retrieve(query, locale=locale)
-            rag_results = rag_result.wines
-            filter_used = rag_result.filter_used
-        except Exception as exc:
-            log.warning("RAG retrieval failed: %s", exc)
-            rag_results = []
-            filter_used = {}
+    from src.graph import run_via_graph
 
-    # 2. Build messages
-    messages = _build_messages(query, locale, history, rag_results)
+    final_state = run_via_graph(
+        query=query,
+        model=model,
+        locale=locale,
+        history=history,
+        rag_context=precomputed_rag,
+        filter_used=precomputed_filter or {},
+        user_id=user_id,
+        profile=profile or {},
+        session_id=session_id or "unknown",
+    )
 
-    # 3. Create agent and invoke (with fallback)
-    tool_calls_log: list[dict[str, Any]] = []
-    used_model = model
-
-    for attempt, m in enumerate([model, model, FALLBACK_MODEL]):
-        try:
-            if attempt == 1:
-                time.sleep(2)
-            used_model = m
-            llm = get_llm(m, temperature=0.2)
-            agent = create_agent(llm, tools=TOOLS)
-
-            # invoke() (not stream) so each LLM call returns usage_metadata
-            final_state = agent.invoke(
-                {"messages": messages},
-                config={"recursion_limit": 14},  # ~6 agent iterations
-            )
-            all_msgs = final_state["messages"]
-
-            # Collect tool calls from all AI turns, keyed by tool_call_id so the
-            # matching ToolMessage result can be attached to the right entry.
-            tool_call_by_id: dict[str, dict[str, Any]] = {}
-            for msg in all_msgs:
-                if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
-                    for tc in msg.tool_calls:
-                        entry = {
-                            "tool_name": tc["name"],
-                            "arguments": tc["args"],
-                            "result": None,
-                        }
-                        tool_call_by_id[tc["id"]] = entry
-                        tool_calls_log.append(entry)
-
-            # Attach each tool's actual return value to its call entry
-            for msg in all_msgs:
-                if isinstance(msg, ToolMessage):
-                    entry = tool_call_by_id.get(msg.tool_call_id)
-                    if entry is not None:
-                        entry["result"] = _parse_tool_message_content(msg.content)
-
-            # Final answer = last AI message
-            ai_msgs = [m for m in all_msgs if isinstance(m, AIMessage)]
-            final_answer = ai_msgs[-1].content if ai_msgs else ""
-
-            # Sum token usage across all AI turns
-            input_tokens = sum(
-                (getattr(m, "usage_metadata", None) or {}).get("input_tokens", 0)
-                for m in ai_msgs
-            )
-            output_tokens = sum(
-                (getattr(m, "usage_metadata", None) or {}).get("output_tokens", 0)
-                for m in ai_msgs
-            )
-
-            latency_ms = int((time.monotonic() - t0) * 1000)
-            return AgentResult(
-                answer=final_answer,
-                tool_calls=tool_calls_log,
-                retrieved_wines=rag_results,
-                filter_used=filter_used,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                latency_ms=latency_ms,
-                model_used=used_model,
-                status="ok",
-            )
-
-        except Exception as exc:
-            log.warning("Agent attempt %d with %s failed: %s", attempt + 1, m, exc)
-            if attempt == 2:
-                latency_ms = int((time.monotonic() - t0) * 1000)
-                return AgentResult(
-                    answer="Sorry, I encountered an error. Please try again.",
-                    latency_ms=latency_ms,
-                    model_used=used_model,
-                    status="error",
-                    error_code="LLM_ERROR",
-                )
-
-    # unreachable
-    return AgentResult(answer="", status="error", error_code="INTERNAL")
+    latency_ms = int((time.monotonic() - t0) * 1000)
+    return AgentResult(
+        answer=final_state.get("answer", ""),
+        tool_calls=final_state.get("tool_calls", []),
+        retrieved_wines=final_state.get("rag_context") or [],
+        filter_used=final_state.get("filter_used") or {},
+        input_tokens=final_state.get("input_tokens", 0),
+        output_tokens=final_state.get("output_tokens", 0),
+        latency_ms=latency_ms,
+        model_used=final_state.get("model_used", model),
+        status=final_state.get("status", "ok"),
+        error_code=final_state.get("error_code"),
+    )
