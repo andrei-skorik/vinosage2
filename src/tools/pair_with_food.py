@@ -21,16 +21,20 @@ _ERR = lambda code, msg: {"error": {"code": code, "message": msg}}   # noqa: E73
 _PAIRING_TRIGGER_RE = re.compile(
     r"\b(?:"
     r"try\s+it\s+with|try\s+with|serve\s+with|serve\s+alongside|"
-    r"pair(?:s)?\s+(?:perfectly\s+|well\s+)?with|"
-    r"drink\s+with|goes?\s+(?:perfectly\s+|well\s+)?with|"
+    r"pair(?:s|ing)?\s+(?:(?:very|really|so)\s+)?(?:perfectly\s+|well\s+|beautifully\s+|nicely\s+)?with|"
+    r"drink\s+with|goes?\s+(?:perfectly\s+|well\s+|beautifully\s+)?with|"
     r"enjoy\s+(?:it\s+)?with|"
     r"partner\s+(?:this\s+|it\s+)?with|partner\s+for|"
     r"perfect\s+(?:with|for|pairing\s+for|match\s+for|accompaniment\s+(?:for|with|to))|"
     r"excellent\s+(?:with|match\s+for)|"
     r"delicious\s+with|fantastic\s+with|great\s+with|wonderful\s+with|lovely\s+with|"
+    r"divine\s+with|a\s+dream\s+with|a\s+treat\s+with|"
     r"best\s+with|perfectly\s+with|ideal\s+(?:with|for)|"
+    r"complement[s]?\s+|will\s+complement|works\s+well\s+with|"
+    r"match(?:es)?\s+(?:perfectly|beautifully|well)\s+with|"
+    r"(?:a\s+)?(?:perfect|fantastic|great|delicious|wonderful|excellent|ideal)\s+complement\s+(?:for|to)|"
     r"accompani(?:es|ment)\s+(?:for|to)|a\s+natural\s+match\s+for|"
-    r"stand\s+up\s+to|suited\s+to|complemented\s+by|good\s+with"
+    r"stand(?:s)?\s+up\s+(?:\w+\s+){0,2}to|suited\s+to|complemented\s+by|good\s+with"
     r")",
     re.IGNORECASE,
 )
@@ -49,7 +53,8 @@ _FOOD_NOUNS = frozenset({
     # When the user's dish IS "cake" (single word), the full phrase is used directly.
     "chocolate", "steak", "beef", "lamb", "venison", "pork",
     "chicken", "turkey", "duck", "salmon", "tuna", "fish", "seafood", "lobster",
-    "shrimp", "oyster", "sushi", "pasta", "pizza", "risotto", "mushroom", "truffle",
+    "shrimp", "shrimps", "oyster", "oysters", "sushi", "pasta", "pizza", "risotto",
+    "mushroom", "mushrooms", "truffle", "truffles",
     "cheese", "salad", "barbecue", "curry", "spicy", "tagine", "casserole", "meat",
     "pudding", "puddings", "mousse", "fondue", "brownie", "brownies", "tart", "tarts",
     "bread", "brioche", "flatbread", "noodle", "noodles", "dumpling", "dumplings",
@@ -95,10 +100,15 @@ def _desc_mentions_food(desc, title, keywords: list[str]) -> bool:
     "a natural match for", etc.) prevents tasting-note descriptors
     ("dark chocolate and a creamy texture") from being mistaken for pairing
     recommendations.  Handles NaN / non-string descriptions gracefully.
+
+    Matching is plural-agnostic: the keyword is stemmed to its singular root
+    (strip trailing 's' when safe) and matched with an optional trailing 's',
+    so "shrimp" matches "shrimps" in a description and vice-versa.
     """
     for ctx in _pairing_contexts(desc):
         for kw in keywords:
-            if re.search(r"\b" + re.escape(kw) + r"\b", ctx):
+            stem = kw[:-1] if kw.endswith("s") and len(kw) > 3 else kw
+            if re.search(r"\b" + re.escape(stem) + r"s?\b", ctx):
                 return True
     return False
 
@@ -124,15 +134,29 @@ def _run(
         active = df["is_active"].notna()
         keywords = _desc_keywords(dish)
 
-        # ── Priority 1: wines whose description explicitly mentions this food ──
-        # Use title-aware matching to exclude wine-name false positives.
-        desc_hit = df.apply(
-            lambda row: _desc_mentions_food(
-                row.get("description") or "", row.get("title") or "", keywords
-            ),
-            axis=1,
-        )
-        catalog_matches = df[active & desc_hit].copy()
+        def _apply(kws: list[str]):
+            return df.apply(
+                lambda row: _desc_mentions_food(
+                    row.get("description") or "", row.get("title") or "", kws
+                ),
+                axis=1,
+            )
+
+        # ── Pass 1: exact phrase match ("dark chocolate" searched literally) ──
+        # This finds wines that specifically mention the full dish in a pairing
+        # context (e.g. "will complement a dark chocolate dessert").
+        exact_kw = keywords[:1]
+        catalog_matches = df[active & _apply(exact_kw)].copy()
+        match_quality = "specific"
+
+        # ── Pass 2: broad fallback (includes bare food nouns) ──
+        # Only triggered when the full phrase produced no results.  For a
+        # "dark chocolate" query this falls back to "chocolate"-pairing wines —
+        # but agent_instruction is updated to be honest about the match tier.
+        if catalog_matches.empty and len(keywords) > 1:
+            catalog_matches = df[active & _apply(keywords)].copy()
+            match_quality = "broad"
+
         catalog_matches["_source"] = "catalog_description"
 
         if prefer_type and prefer_type != "any":
@@ -186,15 +210,30 @@ def _run(
             })
 
         titles = [p["title"] for p in pairings]
-        return {
-            "dish": dish,
-            "pairings": pairings,
-            "agent_instruction": (
+
+        if match_quality == "broad":
+            base_nouns = " or ".join(keywords[1:])
+            instr = (
+                f"The catalog has no wine that specifically mentions '{dish}' as a pairing. "
+                f"However, these {len(pairings)} wine(s) are catalog-confirmed pairings for "
+                f"{base_nouns!r} in general: {titles}. "
+                f"In your response, tell the customer these are catalog-confirmed pairings for "
+                f"{base_nouns} but have not been specifically verified for '{dish}'. "
+                f"Do NOT claim they are specifically confirmed for '{dish}'. "
+                f"Do NOT add any other wines not in this list."
+            )
+        else:
+            instr = (
                 f"The catalog confirms exactly {len(pairings)} wine(s) pair with {dish!r}: "
                 f"{titles}. Recommend ONLY these wines for {dish!r}. "
                 f"Do NOT add any other wines as alternatives — any wine not in this list "
                 f"has NOT been confirmed as a {dish!r} pairing in the catalog."
-            ),
+            )
+
+        return {
+            "dish": dish,
+            "pairings": pairings,
+            "agent_instruction": instr,
         }
 
     except Exception as exc:

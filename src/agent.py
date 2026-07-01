@@ -36,16 +36,20 @@ log = logging.getLogger(__name__)
 _PAIRING_TRIGGER_RE = re.compile(
     r"\b(?:"
     r"try\s+it\s+with|try\s+with|serve\s+with|serve\s+alongside|"
-    r"pair(?:s)?\s+(?:perfectly\s+|well\s+)?with|"
-    r"drink\s+with|goes?\s+(?:perfectly\s+|well\s+)?with|"
+    r"pair(?:s|ing)?\s+(?:(?:very|really|so)\s+)?(?:perfectly\s+|well\s+|beautifully\s+|nicely\s+)?with|"
+    r"drink\s+with|goes?\s+(?:perfectly\s+|well\s+|beautifully\s+)?with|"
     r"enjoy\s+(?:it\s+)?with|"
     r"partner\s+(?:this\s+|it\s+)?with|partner\s+for|"
     r"perfect\s+(?:with|for|pairing\s+for|match\s+for|accompaniment\s+(?:for|with|to))|"
     r"excellent\s+(?:with|match\s+for)|"
     r"delicious\s+with|fantastic\s+with|great\s+with|wonderful\s+with|lovely\s+with|"
+    r"divine\s+with|a\s+dream\s+with|a\s+treat\s+with|"
     r"best\s+with|perfectly\s+with|ideal\s+(?:with|for)|"
+    r"complement[s]?\s+|will\s+complement|works\s+well\s+with|"
+    r"match(?:es)?\s+(?:perfectly|beautifully|well)\s+with|"
+    r"(?:a\s+)?(?:perfect|fantastic|great|delicious|wonderful|excellent|ideal)\s+complement\s+(?:for|to)|"
     r"accompani(?:es|ment)\s+(?:for|to)|a\s+natural\s+match\s+for|"
-    r"stand\s+up\s+to|suited\s+to|complemented\s+by|good\s+with"
+    r"stand(?:s)?\s+up\s+(?:\w+\s+){0,2}to|suited\s+to|complemented\s+by|good\s+with"
     r")",
     re.IGNORECASE,
 )
@@ -192,10 +196,14 @@ def _build_messages(
         _FOOD_KWS = {
             "chocolate","steak","beef","lamb","venison","pork",
             "chicken","turkey","duck","salmon","tuna","fish","seafood","lobster",
-            "shrimp","oyster","sushi","pasta","pizza","risotto","mushroom","truffle",
+            "shrimp","shrimps","oyster","oysters","sushi","pasta","pizza","risotto",
+            "mushroom","mushrooms","truffle","truffles",
             "cheese","salad","barbecue","curry","spicy","tagine","casserole","meat",
         }
-        query_food = [w for w in re.findall(r'\b\w{4,}\b', query.lower()) if w in _FOOD_KWS]
+        def _in_kws(w: str) -> bool:
+            return w in _FOOD_KWS or (w.endswith("s") and len(w) > 3 and w[:-1] in _FOOD_KWS)
+
+        query_food = [w for w in re.findall(r'\b\w{4,}\b', query.lower()) if _in_kws(w)]
         # Follow-up queries ("Is it the only one?") have no food keywords — inherit
         # food context from recent conversation history so the filter stays active.
         if not query_food and history:
@@ -203,8 +211,7 @@ def _build_messages(
                 m["content"] for m in history[-6:]
                 if isinstance(m.get("content"), str)
             )
-            query_food = [w for w in re.findall(r'\b\w{4,}\b', recent.lower())
-                          if w in _FOOD_KWS]
+            query_food = [w for w in re.findall(r'\b\w{4,}\b', recent.lower()) if _in_kws(w)]
 
         def _has_desc_evidence(wine: RetrievedWine, food_words: list[str]) -> bool:
             raw = wine.payload.get("description")
@@ -217,7 +224,8 @@ def _build_messages(
                 contexts.append((after[: end.start()] if end else after[:150]).lower())
             for ctx in contexts:
                 for fw in food_words:
-                    if re.search(r"\b" + re.escape(fw) + r"\b", ctx):
+                    stem = fw[:-1] if fw.endswith("s") and len(fw) > 3 else fw
+                    if re.search(r"\b" + re.escape(stem) + r"s?\b", ctx):
                         return True
             return False
 
@@ -254,14 +262,18 @@ def _build_messages(
 _FOOD_QUERY_KWS = {
     "chocolate","cake","steak","beef","lamb","venison","pork",
     "chicken","turkey","duck","salmon","tuna","fish","seafood","lobster",
-    "shrimp","oyster","sushi","pasta","pizza","risotto","mushroom","truffle",
+    "shrimp","shrimps","oyster","oysters","sushi","pasta","pizza","risotto",
+    "mushroom","mushrooms","truffle","truffles",
     "cheese","salad","barbecue","curry","spicy","tagine","casserole","meat",
 }
 
 
 def _is_food_query(query: str, history: list[dict[str, Any]] | None) -> bool:
     """Return True if query (or recent history) is about food pairing."""
-    found = [w for w in re.findall(r'\b\w{4,}\b', query.lower()) if w in _FOOD_QUERY_KWS]
+    def _in_fqkws(w: str) -> bool:
+        return w in _FOOD_QUERY_KWS or (w.endswith("s") and len(w) > 3 and w[:-1] in _FOOD_QUERY_KWS)
+
+    found = [w for w in re.findall(r'\b\w{4,}\b', query.lower()) if _in_fqkws(w)]
     if found:
         return True
     if history:
@@ -269,7 +281,7 @@ def _is_food_query(query: str, history: list[dict[str, Any]] | None) -> bool:
             m["content"] for m in history[-6:]
             if isinstance(m.get("content"), str)
         )
-        return bool([w for w in re.findall(r'\b\w{4,}\b', recent.lower()) if w in _FOOD_QUERY_KWS])
+        return bool([w for w in re.findall(r'\b\w{4,}\b', recent.lower()) if _in_fqkws(w)])
     return False
 
 
