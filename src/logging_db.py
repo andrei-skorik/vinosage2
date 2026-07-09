@@ -148,6 +148,56 @@ def log_feedback(
         return False
 
 
+def delete_feedback(*, user_id: str, wine_id: str) -> None:
+    """Delete all recommendation_feedback rows for this user + wine.
+
+    Called on toggle-off so that white buttons mean 'no opinion' in the DB
+    as well as in the UI.  Swallows all exceptions — a delete failure must
+    not break the chat path (SPEC §5.4 principle).
+    """
+    try:
+        _db().table("recommendation_feedback") \
+            .delete() \
+            .eq("user_id", user_id) \
+            .eq("wine_id", wine_id) \
+            .execute()
+    except Exception as exc:
+        log.warning("delete_feedback failed: %s", exc)
+
+
+def get_latest_ratings(user_id: str) -> dict[str, str]:
+    """Return {wine_id: rating} for the user's most recent rating per wine.
+
+    Used to pre-populate st.session_state['wine_ratings'] on session start so
+    buttons for previously-rated wines appear with the correct colour without
+    requiring the user to click again.  Fetches at most 500 rows (covers any
+    realistic usage history) and takes the first occurrence of each wine_id
+    (rows are ordered newest-first, so that IS the latest rating).
+    Swallows all exceptions — a read failure returns an empty dict, the UI
+    simply shows uncoloured buttons and writes the rating again on next click.
+    """
+    try:
+        rows = (
+            _db()
+            .table("recommendation_feedback")
+            .select("wine_id,rating")
+            .eq("user_id", user_id)
+            .order("created_at", desc=True)
+            .limit(500)
+            .execute()
+            .data
+        )
+        seen: dict[str, str] = {}
+        for row in rows:
+            wid = str(row.get("wine_id") or "")
+            if wid and wid not in seen:
+                seen[wid] = row["rating"]
+        return seen
+    except Exception as exc:
+        log.warning("get_latest_ratings failed: %s", exc)
+        return {}
+
+
 def log_token_usage(
     *,
     query_id: str,

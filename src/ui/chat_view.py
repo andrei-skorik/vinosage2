@@ -174,7 +174,7 @@ def render_feedback_buttons(tool_calls: list[dict[str, Any]], query_id: str | No
     if not wines:
         return
 
-    from src.logging_db import log_feedback
+    from src.logging_db import log_feedback, get_latest_ratings, delete_feedback
     from src.preferences import fold_feedback
     import streamlit.components.v1 as components
 
@@ -184,12 +184,26 @@ def render_feedback_buttons(tool_calls: list[dict[str, Any]], query_id: str | No
 
     if "wine_ratings" not in st.session_state:
         st.session_state["wine_ratings"] = {}
+        st.session_state["wine_ratings_loaded"] = False
     ratings: dict[str, str | None] = st.session_state["wine_ratings"]
+
+    # Load the user's existing ratings from the DB exactly once per session so
+    # that wines rated in previous conversations appear with the correct button
+    # colour and don't generate a redundant DB write on the next click.
+    if user_id and not st.session_state.get("wine_ratings_loaded"):
+        loaded = get_latest_ratings(user_id)
+        ratings.update(loaded)
+        st.session_state["wine_ratings_loaded"] = True
 
     def _toggle(wine: dict[str, Any], direction: str) -> None:
         wine_id = str(wine.get("wine_id", ""))
         if ratings.get(wine_id) == direction:
+            # Same button again → toggle off: white buttons = no opinion.
+            # Delete the DB record and remove attributes from the profile.
             ratings[wine_id] = None
+            if user_id:
+                delete_feedback(user_id=user_id, wine_id=wine_id)
+                fold_feedback(user_id, wine, "none")
             return
         ratings[wine_id] = direction
         ok = log_feedback(

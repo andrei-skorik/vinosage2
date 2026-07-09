@@ -99,19 +99,21 @@ def delete_preferences(user_id: str) -> bool:
 
 
 def fold_feedback(user_id: str, wine: dict[str, Any], rating: str) -> None:
-    """Fold a single 👍/👎 into the profile (SPEC §5.4).
+    """Fold a 👍 / 👎 / toggle-off into the taste profile (SPEC §5.4).
 
-    👍 → add the wine's type/grape/style to the matching preferred_* arrays.
-    👎 → add the wine's grape/style (not type) to disliked_*, but ONLY if it
-    isn't already in the matching preferred_* array — an explicit positive
-    preference always wins over a single thumbs-down.
+    rating == "up"   → add type/grape/style to preferred_*;
+                        remove them from disliked_* (user changed mind).
+    rating == "down" → add grape/style to disliked_*;
+                        remove them from preferred_* (user changed mind).
+    rating == "none" → toggle-off: remove type/grape/style from BOTH buckets.
 
-    This is conditioning, not model training — a best-effort, idempotent
-    nudge, not RLHF. Reads/writes via the service-role client: this is an
-    internal mutation triggered by the user's own feedback click (not a
-    "show me my data" read), so it doesn't need get_preferences()'s
-    authed-client/RLS path. Failure is logged, never raised — the caller
-    (a Streamlit button click) must never see an exception.
+    Bidirectional updates ensure that flipping a rating always produces a
+    consistent profile: no attribute can live in both preferred_* and
+    disliked_* simultaneously.
+
+    Reads/writes via the service-role client (not authed RLS path) because
+    this is an internal mutation, not a user data-read.  Failure is logged,
+    never raised — a feedback write must not break the chat path.
     """
     try:
         resp = get_service_db().table("user_preferences").select("*").eq("user_id", user_id).limit(1).execute()
@@ -130,20 +132,46 @@ def fold_feedback(user_id: str, wine: dict[str, Any], rating: str) -> None:
     wine_type, wine_grape, wine_style = wine.get("type"), wine.get("grape"), wine.get("style")
     changed = False
 
+    # Triples: (value, preferred_bucket, disliked_bucket)
+    triples = [
+        (wine_type,  preferred_types,  disliked_types),
+        (wine_grape, preferred_grapes, disliked_grapes),
+        (wine_style, preferred_styles, disliked_styles),
+    ]
+
     if rating == "up":
-        for value, bucket in (
-            (wine_type, preferred_types), (wine_grape, preferred_grapes), (wine_style, preferred_styles),
-        ):
-            if value and isinstance(value, str) and value not in bucket:
-                bucket.add(value)
+        for value, pref, dislike in triples:
+            if not value or not isinstance(value, str):
+                continue
+            if value not in pref:
+                pref.add(value)
+                changed = True
+            if value in dislike:
+                dislike.discard(value)
                 changed = True
     elif rating == "down":
-        for value, dislike_bucket, preferred_bucket in (
-            (wine_grape, disliked_grapes, preferred_grapes),
-            (wine_style, disliked_styles, preferred_styles),
-        ):
-            if value and isinstance(value, str) and value not in preferred_bucket and value not in dislike_bucket:
-                dislike_bucket.add(value)
+        for value, pref, dislike in triples:
+            if not value or not isinstance(value, str):
+                continue
+            # type is excluded from disliked per SPEC §5.4
+            if dislike is disliked_types:
+                continue
+            if value in pref:
+                pref.discard(value)
+                changed = True
+            if value not in dislike:
+                dislike.add(value)
+                changed = True
+    elif rating == "none":
+        # Toggle-off: remove from both buckets unconditionally
+        for value, pref, dislike in triples:
+            if not value or not isinstance(value, str):
+                continue
+            if value in pref:
+                pref.discard(value)
+                changed = True
+            if value in dislike:
+                dislike.discard(value)
                 changed = True
 
     if not changed:

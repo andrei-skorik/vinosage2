@@ -62,10 +62,9 @@ class TestDetectPreferenceSignals:
 
 
 class TestFoldFeedback:
-    def test_down_vote_does_not_add_grape_already_preferred(self):
-        """Explicit positive preference wins over a single thumbs-down
-        (SPEC §5.4) — Malbec is already in preferred_grapes, so a 👎 on a
-        Malbec wine must not add it to disliked_grapes."""
+    def test_down_vote_moves_grape_from_preferred_to_disliked(self):
+        """Flipping from 👍 to 👎 must remove the attribute from preferred_*
+        AND add it to disliked_* — user explicitly changed their mind."""
         existing_profile = {
             "expertise_level": "beginner",
             "preferred_types": [], "preferred_grapes": ["Malbec"], "preferred_countries": [],
@@ -91,8 +90,14 @@ class TestFoldFeedback:
             fold_feedback("user-1", wine, "down")
 
         mock_upsert.assert_called_once()
-        assert "Malbec" not in mock_upsert.call_args.kwargs["disliked_grapes"]
-        assert "Rich & Juicy" in mock_upsert.call_args.kwargs["disliked_styles"]
+        kwargs = mock_upsert.call_args.kwargs
+        # Malbec moves out of preferred and into disliked
+        assert "Malbec" not in kwargs["preferred_grapes"]
+        assert "Malbec" in kwargs["disliked_grapes"]
+        # Style also lands in disliked
+        assert "Rich & Juicy" in kwargs["disliked_styles"]
+        # Type is excluded from disliked per SPEC §5.4
+        assert "Red" not in kwargs["disliked_types"]
 
     def test_up_vote_adds_type_grape_style_to_preferred(self):
         empty_profile = {
