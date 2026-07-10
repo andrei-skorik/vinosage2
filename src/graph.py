@@ -91,6 +91,9 @@ _RECOMMEND_PATTERNS = [
     # verb precedes "me" and "recommendations" follows with optional qualifiers.
     # m? tolerates the common single-m typo "recomendation(s)".
     r"\b(?:give|show|find|get)\s+me\b.{0,30}\brecomm?endations?\b",
+    # "Recommend a sparkling wine under €25" — sentence-initial imperative without
+    # "me". Anchored at ^ so "I don't recommend it" stays in general route.
+    r"^\s*(?:please\s+)?recomm?end\b",
     r"\bwhat\s+should\s+i\s+(try|drink|buy)\b",
     # "What's a good/great/nice/decent/best X?" — a recommendation request,
     # not an educational one; must appear before the broad what's educate pattern.

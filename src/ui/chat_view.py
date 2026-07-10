@@ -165,6 +165,8 @@ def _recommended_wines_for_feedback(
             items = result.get("pairings") or []
         elif tc.get("tool_name") == "recommend_for_me":
             items = result.get("recommendations") or []
+        elif tc.get("tool_name") == "filter_wines":
+            items = result.get("wines") or []
         else:
             continue
         for w in items:

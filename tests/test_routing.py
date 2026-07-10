@@ -39,6 +39,17 @@ class TestExistingPatterns:
         # Single-m typo in verb form "recomend me something"
         assert _route("recomend me something good") == "recommend"
 
+    def test_recommend_sentence_initial_no_me(self):
+        # Imperative "Recommend <type> under <budget>" without "me"
+        assert _route("Recommend a sparkling wine under €25") == "recommend"
+
+    def test_please_recommend(self):
+        assert _route("Please recommend something light") == "recommend"
+
+    def test_i_dont_recommend_stays_general(self):
+        # Negative sentence — not a user request
+        assert _route("I don't recommend this wine") == "general"
+
     def test_compare_before_educate(self):
         assert _route("Compare Malbec and Merlot styles") == "compare"
 
