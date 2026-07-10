@@ -19,7 +19,16 @@ _EXPERTISE_LEVELS = ["beginner", "enthusiast", "connoisseur"]
 def _catalog_options() -> dict[str, list[str]]:
     """Distinct catalog values for each taste dimension — multiselect options
     are restricted to these so a user can never save a preference that
-    doesn't correspond to a real catalog value (SPEC §4.3)."""
+    doesn't correspond to a real catalog value (SPEC §4.3).
+
+    Result is stored in session_state so the full DataFrame scan runs at
+    most once per browser session, not on every Streamlit rerun.
+    """
+    import streamlit as _st
+    cached = _st.session_state.get("_catalog_options_cache")
+    if cached is not None:
+        return cached
+
     df = get_active_wines_df()
     if df.empty:
         return {"type": [], "grape": [], "country": [], "style": [], "characteristics": []}
@@ -28,13 +37,15 @@ def _catalog_options() -> dict[str, list[str]]:
     for raw in df["characteristics"].dropna():
         chars.update(p.strip() for p in str(raw).split(",") if p.strip())
 
-    return {
+    result = {
         "type":    sorted(df["type"].dropna().unique().tolist()),
         "grape":   sorted(df["grape"].dropna().unique().tolist()),
         "country": sorted(df["country"].dropna().unique().tolist()),
         "style":   sorted(df["style"].dropna().unique().tolist()),
         "characteristics": sorted(chars),
     }
+    _st.session_state["_catalog_options_cache"] = result
+    return result
 
 
 def render_taste_profile(locale: str) -> None:

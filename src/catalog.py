@@ -59,15 +59,27 @@ def _fetch_all_active() -> list[dict]:
 
 
 def get_active_wines_df() -> pd.DataFrame:
-    """Return cached DataFrame of active wines; refresh if stale."""
+    """Return cached DataFrame of active wines; refresh if stale.
+
+    On network/timeout errors returns the last good cache (stale-on-error)
+    so a transient Supabase hiccup never crashes the sidebar or tools.
+    Only raises when there is no prior data at all.
+    """
     now = datetime.now(timezone.utc)
-    if (
+    is_stale = (
         _cache["df"] is None
         or _cache["ts"] is None
         or (now - _cache["ts"]).total_seconds() > _CACHE_TTL
-    ):
-        rows = _fetch_all_active()
-        df = pd.DataFrame(rows) if rows else pd.DataFrame()
-        _cache["df"] = df
-        _cache["ts"] = now
+    )
+    if is_stale:
+        try:
+            rows = _fetch_all_active()
+            _cache["df"] = pd.DataFrame(rows) if rows else pd.DataFrame()
+            _cache["ts"] = now
+        except Exception:
+            if _cache["df"] is None:
+                _cache["df"] = pd.DataFrame()
+            # Keep stale ts so the next rerun doesn't immediately retry
+            # and hammer a Supabase that's already under stress.
+            _cache["ts"] = now
     return _cache["df"]
