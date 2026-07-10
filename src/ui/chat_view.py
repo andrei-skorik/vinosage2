@@ -229,6 +229,21 @@ def render_feedback_buttons(
         ratings.update(loaded)
         st.session_state["wine_ratings_loaded"] = True
 
+    def _bust_profile_state() -> None:
+        """Clear sidebar profile cache + all preference widget states.
+
+        st.multiselect ignores `default` on reruns when widget state already
+        exists in session_state — popping those keys forces Streamlit to
+        re-initialise them from the fresh profile on the next rerun.
+        """
+        st.session_state.pop("_prefs_cache", None)
+        for _k in (
+            "pref_types", "pref_grapes", "pref_countries",
+            "pref_styles", "pref_characteristics",
+            "disliked_types", "disliked_grapes", "disliked_styles",
+        ):
+            st.session_state.pop(_k, None)
+
     def _toggle(wine: dict[str, Any], direction: str) -> None:
         wine_id = str(wine.get("wine_id", ""))
         if ratings.get(wine_id) == direction:
@@ -238,7 +253,7 @@ def render_feedback_buttons(
             if user_id:
                 delete_feedback(user_id=user_id, wine_id=wine_id)
                 fold_feedback(user_id, wine, "none")
-                st.session_state.pop("_prefs_cache", None)
+                _bust_profile_state()
             return
         ratings[wine_id] = direction
         ok = log_feedback(
@@ -252,9 +267,7 @@ def render_feedback_buttons(
         if ok:
             if user_id:
                 fold_feedback(user_id, wine, direction)
-                # Bust the sidebar profile cache so the updated type/grape/style
-                # appears in Taste Profile immediately after st.rerun().
-                st.session_state.pop("_prefs_cache", None)
+                _bust_profile_state()
             st.toast(t("feedback_saved", locale))
 
     # color_map: active marker → CSS colour (absent = reset to default).
