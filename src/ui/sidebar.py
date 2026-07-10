@@ -58,6 +58,21 @@ def render_taste_profile(locale: str) -> None:
 
         user_id = auth["user_id"]
 
+        # Apply a feedback fold that happened during the previous script run
+        # (written by chat_view._fold_cache before st.rerun() was called).
+        # This must happen BEFORE any widget renders so the new values take
+        # effect immediately — Streamlit ignores session_state writes that
+        # occur after a widget with that key has already rendered.
+        pending = st.session_state.pop("_pending_profile_update", None)
+        if pending is not None:
+            st.session_state["_prefs_cache"] = pending
+            st.session_state["pref_types"]      = pending.get("preferred_types")  or []
+            st.session_state["pref_grapes"]     = pending.get("preferred_grapes") or []
+            st.session_state["pref_styles"]     = pending.get("preferred_styles") or []
+            st.session_state["disliked_types"]  = pending.get("disliked_types")   or []
+            st.session_state["disliked_grapes"] = pending.get("disliked_grapes")  or []
+            st.session_state["disliked_styles"] = pending.get("disliked_styles")  or []
+
         if "_prefs_cache" not in st.session_state:
             with st.spinner(t("loading_profile", locale)):
                 st.session_state["_prefs_cache"] = get_preferences(

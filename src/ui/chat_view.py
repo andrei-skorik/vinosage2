@@ -229,35 +229,67 @@ def render_feedback_buttons(
         ratings.update(loaded)
         st.session_state["wine_ratings_loaded"] = True
 
-    def _bust_widget_state() -> None:
-        """Clear sidebar multiselect widget states only.
+    def _fold_cache(wine: dict[str, Any], direction: str) -> None:
+        """Mirror fold_feedback's logic onto _prefs_cache in-place.
 
-        st.multiselect ignores `default` on reruns when the widget key exists
-        in session_state — popping those keys forces Streamlit to re-initialise
-        them from the current _prefs_cache on the next rerun.
-        _prefs_cache itself is intentionally NOT cleared here: it is updated
-        in-place by _toggle so the sidebar reflects the change immediately
-        without a round-trip DB read.
+        fold_feedback() already wrote the change to Supabase; this function
+        applies the same mutation to the cached profile dict so the sidebar
+        reflects the new preference on the very next rerun — no extra DB
+        round-trip needed.  Then the multiselect widget keys are popped so
+        Streamlit re-initialises them from the updated cache (widgets ignore
+        `default` when their key already exists in session_state).
         """
-        for _k in (
-            "pref_types", "pref_grapes", "pref_countries",
-            "pref_styles", "pref_characteristics",
-            "disliked_types", "disliked_grapes", "disliked_styles",
-        ):
-            st.session_state.pop(_k, None)
+        cache = st.session_state.get("_prefs_cache")
+        if not cache:
+            return
+
+        wtype  = wine.get("type")
+        wgrape = wine.get("grape")
+        wstyle = wine.get("style")
+
+        p: dict[str, Any] = dict(cache)
+        pt  = set(p.get("preferred_types")  or [])
+        pg  = set(p.get("preferred_grapes") or [])
+        ps  = set(p.get("preferred_styles") or [])
+        dt  = set(p.get("disliked_types")   or [])
+        dg  = set(p.get("disliked_grapes")  or [])
+        ds  = set(p.get("disliked_styles")  or [])
+
+        if direction == "up":
+            if wtype:  pt.add(wtype);  dt.discard(wtype)
+            if wgrape: pg.add(wgrape); dg.discard(wgrape)
+            if wstyle: ps.add(wstyle); ds.discard(wstyle)
+        elif direction == "down":
+            if wgrape: pg.discard(wgrape); dg.add(wgrape)
+            if wstyle: ps.discard(wstyle); ds.add(wstyle)
+        elif direction == "none":
+            for v, a, b in [(wtype, pt, dt), (wgrape, pg, dg), (wstyle, ps, ds)]:
+                if v: a.discard(v); b.discard(v)
+
+        p.update({
+            "preferred_types":  sorted(pt),
+            "preferred_grapes": sorted(pg),
+            "preferred_styles": sorted(ps),
+            "disliked_types":   sorted(dt),
+            "disliked_grapes":  sorted(dg),
+            "disliked_styles":  sorted(ds),
+        })
+        # Store as a pending update.  The sidebar's render_taste_profile() reads
+        # this key at the TOP of its execution — before any multiselect renders —
+        # and applies it to both _prefs_cache and the widget keys.  Setting widget
+        # keys before the widget renders is the only reliable Streamlit pattern;
+        # setting them after the widget has already rendered in the same run is
+        # silently discarded on reruns caused by st.rerun() in some versions.
+        st.session_state["_pending_profile_update"] = p
 
     def _toggle(wine: dict[str, Any], direction: str) -> None:
         wine_id = str(wine.get("wine_id", ""))
         if ratings.get(wine_id) == direction:
-            # Same button again → toggle off: white buttons = no opinion.
-            # Delete the DB record and remove attributes from the profile.
             ratings[wine_id] = None
             if user_id:
                 delete_feedback(user_id=user_id, wine_id=wine_id)
-                new_profile = fold_feedback(user_id, wine, "none")
-                if new_profile is not None:
-                    st.session_state["_prefs_cache"] = new_profile
-                _bust_widget_state()
+                fold_feedback(user_id, wine, "none")
+                _fold_cache(wine, "none")
             return
         ratings[wine_id] = direction
         ok = log_feedback(
@@ -270,10 +302,8 @@ def render_feedback_buttons(
         )
         if ok:
             if user_id:
-                new_profile = fold_feedback(user_id, wine, direction)
-                if new_profile is not None:
-                    st.session_state["_prefs_cache"] = new_profile
-                _bust_widget_state()
+                fold_feedback(user_id, wine, direction)
+                _fold_cache(wine, direction)
             st.toast(t("feedback_saved", locale))
 
     # color_map: active marker → CSS colour (absent = reset to default).
