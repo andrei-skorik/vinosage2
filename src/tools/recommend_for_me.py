@@ -201,9 +201,12 @@ def build_recommend_for_me_tool(profile: dict[str, Any]) -> StructuredTool:
         name="recommend_for_me",
         description=(
             "Recommend catalog wines personalised to the current user's saved taste "
-            "profile. Use when the user asks what THEY should try/drink/buy, not for "
-            "a specific dish (pair_with_food), named wines (compare_wines), or "
-            "explicit constraints with no personalisation (filter_wines)."
+            "profile. ALWAYS call this tool FIRST — before asking any clarifying "
+            "questions — whenever the user asks what they should try, drink, or buy. "
+            "If the profile is empty the tool will tell you exactly what to ask; "
+            "if it has preferences it returns ready-to-present wine picks. "
+            "Do NOT use for a specific dish (pair_with_food), named wines "
+            "(compare_wines), or explicit filter constraints (filter_wines)."
         ),
         args_schema=RecommendForMeArgs,
     )

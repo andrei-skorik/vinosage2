@@ -84,20 +84,68 @@ _EDUCATE_PATTERNS = [
     r"\bmikä\s+on\b", r"\bselitä\b", r"\bmitä\s+tarkoittaa\b", r"\bero\s+välillä\b",
 ]
 _RECOMMEND_PATTERNS = [
-    # English
+    # English — explicit & interrogative
     r"\b(recommend|suggest)\b.{0,20}\b(me|for me|something)\b",
     r"\bwhat\s+should\s+i\s+(try|drink|buy)\b",
     # "What's a good/great/nice/decent/best X?" — a recommendation request,
     # not an educational one; must appear before the broad what's educate pattern.
     r"^\s*what'?s\s+(a\s+)?(good|great|nice|decent|best)\b",
+    # Profile-explicit: user states they have or wants to use a saved profile.
+    # "have" guard prevents matching "show/edit my profile"; "use" + "my saved"
+    # guards are narrow enough that false positives are unlikely.
+    r"\bhave\s+(?:a\s+|the\s+)?(?:saved\s+)?(?:taste\s+)?profile\b",
+    r"\buse\s+(my\s+)?(saved\s+)?(taste\s+)?(profile|preferences?)\b",
+    r"\bmy\s+saved\s+(taste\s+)?(profile|preferences?)\b",
     # Russian
     r"\bпосовет\w+\b", r"\bчто\s+(мне|бы)\s+(попробовать|выпить|взять|купить)\b",
     r"\bрекоменд\w+\s+мне\b",
+    r"\bесть\s+(сохранённый|сохраненный)\s+(вкусовой\s+)?профил\w+\b",
+    r"\bиспользу\w+\s+(мой\s+)?(сохранённый|сохраненный|вкусовой)?\s*(профил|предпочтени)\w+\b",
     # German
     r"\bempfiehl\b|\bempfehle?\b|\bempfehlt\b", r"\bwas\s+soll\s+ich\s+(probieren|trinken|kaufen)\b",
+    r"\bhabe\s+(ein\s+)?(gespeichertes?\s+)?geschmacksprofil\b",
     # Finnish
     r"\bsuosittele\b", r"\bmitä\s+(minun\s+)?pitäisi\s+(kokeilla|juoda|ostaa)\b",
+    r"\bminulla\s+on\s+(tallennettu\s+)?makuprofiili\b",
 ]
+
+# Keywords that signal the previous assistant turn was in recommend/profile context.
+# When these appear in the last assistant message AND the user reply is short (≤ 20 words),
+# the reply is treated as a recommend-flow continuation so recommend_for_me stays available.
+_RECOMMEND_CONTEXT_SIGNALS = [
+    # English
+    "taste profile", "saved profile", "preference", "personaliz", "personalid",
+    "mood", "occasion", "red or white", "what do you enjoy", "what you like",
+    "what you typically", "flavor", "flavour",
+    # Russian
+    "профил", "вкус", "предпочтени",
+    # German
+    "geschmack", "profil", "präferenz",
+    # Finnish
+    "makuprofiili", "suosikki", "mieltymys",
+]
+
+
+def _is_recommend_followup(query: str, history: list[dict[str, Any]] | None) -> bool:
+    """Return True when the query is a short reply to a recommend-context assistant turn.
+
+    Mirrors _is_food_query's history-scan: find the last assistant message and
+    check whether it was asking about taste / profile. If so, any reply of ≤ 20
+    words is treated as a follow-up so the agent still has recommend_for_me.
+    Upper word-count cap prevents long independent queries from being
+    mis-classified just because an old bot message happened to mention "profile".
+    """
+    if not history:
+        return False
+    if len(query.strip().split()) > 15:
+        return False
+    last_assistant = next(
+        (m["content"].lower() for m in reversed(history) if m.get("role") == "assistant"),
+        None,
+    )
+    if not last_assistant:
+        return False
+    return any(sig in last_assistant for sig in _RECOMMEND_CONTEXT_SIGNALS)
 
 
 def _classify_route(query: str, history: list[dict[str, Any]] | None) -> str:
@@ -121,6 +169,10 @@ def _classify_route(query: str, history: list[dict[str, Any]] | None) -> str:
         return "compare"
     if any(re.search(p, q) for p in _EDUCATE_PATTERNS):
         return "educate"
+    # History-aware: short follow-up to a recommend-context assistant turn.
+    # Checked last so explicit patterns above always win over heuristic.
+    if _is_recommend_followup(query, history):
+        return "recommend"
     return "general"
 
 
