@@ -127,10 +127,34 @@ def _format_tool_result(tool_name: str, result: Any, locale: str) -> str:
     return str(result)
 
 
-def _recommended_wines_for_feedback(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _title_in_response(title: str, response_text: str) -> bool:
+    """True if the wine's brand+variety name appears in the LLM response.
+
+    Strips the vintage year and region (after the first comma) before matching
+    so that "Whale Cove Sauvignon Blanc 2021/22, South Africa" matches the
+    response text "Whale Cove Sauvignon Blanc" regardless of formatting.
+    """
+    import re as _re
+    clean = _re.sub(r",.*$", "", title)                          # drop region
+    clean = _re.sub(r"\s+\d{4}(?:/\d{2,4})?$", "", clean)      # drop vintage
+    clean = clean.strip()
+    if not clean:
+        return True
+    return clean.lower() in response_text.lower()
+
+
+def _recommended_wines_for_feedback(
+    tool_calls: list[dict[str, Any]],
+    response_text: str = "",
+) -> list[dict[str, Any]]:
     """Wines worth collecting 👍/👎 on — only pair_with_food / recommend_for_me
     results (SPEC §4.2): those are the tools that actually recommended
-    specific wines, unlike filter_wines/compare_wines/wine_stats."""
+    specific wines, unlike filter_wines/compare_wines/wine_stats.
+
+    When response_text is provided, only wines whose name actually appears in
+    the LLM's reply are included — this prevents feedback buttons from showing
+    up for wines the tool fetched but the model chose not to present.
+    """
     wines: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     for tc in tool_calls:
@@ -145,13 +169,21 @@ def _recommended_wines_for_feedback(tool_calls: list[dict[str, Any]]) -> list[di
             continue
         for w in items:
             wid = w.get("wine_id")
-            if wid and wid not in seen_ids:
-                seen_ids.add(wid)
-                wines.append(w)
+            if not wid or wid in seen_ids:
+                continue
+            if response_text and not _title_in_response(w.get("title", ""), response_text):
+                continue
+            seen_ids.add(wid)
+            wines.append(w)
     return wines
 
 
-def render_feedback_buttons(tool_calls: list[dict[str, Any]], query_id: str | None, locale: str) -> None:
+def render_feedback_buttons(
+    tool_calls: list[dict[str, Any]],
+    query_id: str | None,
+    locale: str,
+    response_text: str = "",
+) -> None:
     """👍/👎 under each recommended wine (US-005).
 
     Buttons turn green (👍) or red (👎) when active.  Clicking the same
@@ -170,7 +202,7 @@ def render_feedback_buttons(tool_calls: list[dict[str, Any]], query_id: str | No
     """
     if not query_id:
         return
-    wines = _recommended_wines_for_feedback(tool_calls)
+    wines = _recommended_wines_for_feedback(tool_calls, response_text)
     if not wines:
         return
 
@@ -313,6 +345,7 @@ def render_assistant_extras(
     tool_calls: list[dict[str, Any]],
     locale: str,
     query_id: str | None = None,
+    response_text: str = "",
 ) -> None:
     if sources:
         label = t("sources_label", locale, count=len(sources))
@@ -339,7 +372,7 @@ def render_assistant_extras(
                 else:
                     st.code(f"🔧 {name}", language=None)
 
-    render_feedback_buttons(tool_calls, query_id, locale)
+    render_feedback_buttons(tool_calls, query_id, locale, response_text)
 
 
 def _serialize_sources(sources: list[Any]) -> list[dict[str, Any]]:
@@ -408,4 +441,5 @@ def render_chat_history(
                     msg.get("tool_calls", []),
                     locale,
                     query_id=msg.get("query_id"),
+                    response_text=msg.get("content", ""),
                 )

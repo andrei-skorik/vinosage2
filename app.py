@@ -397,7 +397,7 @@ def main() -> None:
                 )
 
                 st.markdown(result.answer)
-                render_assistant_extras(result.retrieved_wines, result.tool_calls, locale, query_id=query_id)
+                render_assistant_extras(result.retrieved_wines, result.tool_calls, locale, query_id=query_id, response_text=result.answer)
 
             # Persist assistant turn (query_id lets historical re-renders show
             # feedback buttons too — see render_chat_history).
